@@ -245,10 +245,14 @@ export class TokenExecutor implements IExecutor {
     slippageBps: number;
   }): Promise<any> {
     try {
+      logger.info('Jupiter Quote Params', params);
       const url = `${this.jupiterApiUrl}/quote`;
       const response = await axios.get(url, { params });
       return response;
     } catch (error) {
+      if (axios.isAxiosError(error) && error.response) {
+        logger.error(`Jupiter API error response: ${JSON.stringify(error.response.data)}`);
+      }
       logger.error(`Error getting Jupiter quote: ${error}`);
       throw error;
     }
