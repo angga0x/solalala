@@ -2,7 +2,8 @@ import {
   Connection, 
   Keypair, 
   Transaction, 
-  sendAndConfirmTransaction
+  sendAndConfirmTransaction,
+  VersionedTransaction
 } from '@solana/web3.js';
 import { backOff } from 'exponential-backoff';
 import axios from 'axios';
@@ -72,10 +73,20 @@ export class TokenExecutor implements IExecutor {
       const { swapTransaction } = swapResponse.data;
 
       // 3. Deserialize, sign, dan kirim transaksi
-      const transaction = Transaction.from(Buffer.from(swapTransaction, 'base64'));
+      // Deteksi apakah transaksi adalah versioned atau legacy
+      const transactionBuffer = Buffer.from(swapTransaction, 'base64');
+      const isVersionedTransaction = transactionBuffer[0] !== 1; // Versioned transactions start with version byte != 1
       
-      // 4. Kirim dan konfirmasi transaksi
-      const signature = await this.sendTransactionWithRetry(transaction);
+      let signature: string;
+      if (isVersionedTransaction) {
+        // Handle versioned transaction
+        const transaction = VersionedTransaction.deserialize(transactionBuffer);
+        signature = await this.sendVersionedTransactionWithRetry(transaction);
+      } else {
+        // Handle legacy transaction
+        const transaction = Transaction.from(transactionBuffer);
+        signature = await this.sendTransactionWithRetry(transaction);
+      }
       
       logger.info(`Token purchase successful: ${signature}`);
       
@@ -165,10 +176,20 @@ export class TokenExecutor implements IExecutor {
       const { swapTransaction } = swapResponse.data;
 
       // 3. Deserialize, sign, dan kirim transaksi
-      const transaction = Transaction.from(Buffer.from(swapTransaction, 'base64'));
+      // Deteksi apakah transaksi adalah versioned atau legacy
+      const transactionBuffer = Buffer.from(swapTransaction, 'base64');
+      const isVersionedTransaction = transactionBuffer[0] !== 1; // Versioned transactions start with version byte != 1
       
-      // 4. Kirim dan konfirmasi transaksi
-      const signature = await this.sendTransactionWithRetry(transaction);
+      let signature: string;
+      if (isVersionedTransaction) {
+        // Handle versioned transaction
+        const transaction = VersionedTransaction.deserialize(transactionBuffer);
+        signature = await this.sendVersionedTransactionWithRetry(transaction);
+      } else {
+        // Handle legacy transaction
+        const transaction = Transaction.from(transactionBuffer);
+        signature = await this.sendTransactionWithRetry(transaction);
+      }
       
       logger.info(`Token sale successful: ${signature}`);
       
@@ -328,6 +349,60 @@ export class TokenExecutor implements IExecutor {
       };
     } catch (error: any) {
       logger.error(`Error fetching token info: ${error}`);
+      throw error;
+    }
+  }
+
+  private async sendVersionedTransactionWithRetry(transaction: VersionedTransaction): Promise<string> {
+    try {
+      // Add signature for the payer (our wallet)
+      transaction.sign([this.wallet]);
+      
+      // Implement exponential backoff for transaction sending
+      const result = await backOff(
+        async () => {
+          try {
+            // Send and confirm transaction
+            const signature = await this.connection.sendTransaction(transaction, {
+              skipPreflight: true,
+              maxRetries: 3,
+            });
+            
+            // Wait for confirmation
+            const latestBlockhash = await this.connection.getLatestBlockhash('confirmed');
+            await this.connection.confirmTransaction({
+              signature,
+              ...latestBlockhash
+            }, 'confirmed');
+            
+            return signature;
+          } catch (error: any) {
+            // Check if the error is retriable
+            if (error.message && (
+                error.message.includes('timeout') ||
+                error.message.includes('block height') ||
+                error.message.includes('too large')
+              )) {
+              logger.warn(`Retriable error: ${error.message}. Retrying...`);
+              throw error; // Rethrow to trigger retry
+            }
+            
+            // Otherwise, it's a non-retriable error
+            logger.error(`Non-retriable transaction error: ${error.message}`);
+            throw new Error(`Transaction failed: ${error.message}`);
+          }
+        },
+        {
+          numOfAttempts: 5,
+          startingDelay: 500,
+          timeMultiple: 2,
+          maxDelay: 5000,
+        }
+      );
+      
+      return result;
+    } catch (error: any) {
+      logger.error(`Failed to send versioned transaction after retries: ${error}`);
       throw error;
     }
   }
